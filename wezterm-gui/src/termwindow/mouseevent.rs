@@ -23,6 +23,21 @@ use wezterm_dynamic::ToDynamic;
 use wezterm_term::input::{MouseButton, MouseEventKind as TMEK};
 use wezterm_term::{ClickPosition, LastMouseClick, StableRowIndex};
 
+/// Decides whether a mouse event that landed on a pane other than the
+/// focused one should be handled against the pane under the mouse
+/// rather than the focused pane.
+///
+/// * `Press` focuses and routes to the clicked pane (click-to-focus).
+/// * `VertWheel` is routed to the hovered pane even without focus.
+/// * `Move` resolves hover state (hyperlink lookup, cursor) and motion
+///   reports against the pane under the mouse, so that the coordinates,
+///   which are converted against that pane, are looked up in the same
+///   pane (#8258).
+/// * `Release` and `HorzWheel` continue to use the focused pane.
+fn event_routes_to_hovered_pane(kind: &WMEK) -> bool {
+    matches!(kind, WMEK::Press(_) | WMEK::Move | WMEK::VertWheel(_))
+}
+
 impl super::TermWindow {
     fn resolve_ui_item(&self, event: &MouseEvent) -> Option<UIItem> {
         let x = event.coords.x;
@@ -682,7 +697,6 @@ impl super::TermWindow {
                             mux.get_active_tab_for_window(self.mux_window_id)
                                 .map(|tab| tab.set_active_idx(pos.index));
 
-                            pane = Arc::clone(&pos.pane);
                             is_click_to_focus_pane = true;
                         }
                         WMEK::Move => {
@@ -691,7 +705,6 @@ impl super::TermWindow {
                                 mux.get_active_tab_for_window(self.mux_window_id)
                                     .map(|tab| tab.set_active_idx(pos.index));
 
-                                pane = Arc::clone(&pos.pane);
                                 context.invalidate();
                             }
                         }
@@ -699,9 +712,19 @@ impl super::TermWindow {
                         WMEK::VertWheel(_) => {
                             // Let wheel events route to the hovered pane,
                             // even if it doesn't have focus
-                            pane = Arc::clone(&pos.pane);
                             context.invalidate();
                         }
+                    }
+                    if event_routes_to_hovered_pane(&event.kind) {
+                        // Resolve the event against the pane under the mouse
+                        // rather than the focused pane.  In particular, a
+                        // mouse Move must have its hover state (hyperlink
+                        // lookup, cursor) and motion report resolved against
+                        // the pane under the mouse: the coordinates below are
+                        // converted against that pane, so looking them up in
+                        // the focused pane resolves hyperlinks in the wrong
+                        // pane. (#8258)
+                        pane = Arc::clone(&pos.pane);
                     }
                 }
                 column = column.saturating_sub(pos.left);
@@ -1049,5 +1072,39 @@ fn mouse_press_to_tmb(press: &MousePress) -> TMB {
         MousePress::Left => TMB::Left,
         MousePress::Right => TMB::Right,
         MousePress::Middle => TMB::Middle,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn move_over_unfocused_pane_routes_to_hovered_pane() {
+        // Regression test for https://github.com/wez/wezterm/issues/8258:
+        // a mouse Move over a pane other than the focused one must resolve
+        // hover state (hyperlink lookup, cursor) and motion reports against
+        // the pane under the mouse, not the focused pane.
+        assert!(event_routes_to_hovered_pane(&WMEK::Move));
+    }
+
+    #[test]
+    fn event_routing_matrix() {
+        // Press focuses and routes to the clicked pane (click-to-focus)
+        assert!(event_routes_to_hovered_pane(&WMEK::Press(MousePress::Left)));
+        assert!(event_routes_to_hovered_pane(&WMEK::Press(
+            MousePress::Right
+        )));
+        assert!(event_routes_to_hovered_pane(&WMEK::Press(
+            MousePress::Middle
+        )));
+        // Vertical wheel events route to the hovered pane even without focus
+        assert!(event_routes_to_hovered_pane(&WMEK::VertWheel(1)));
+        assert!(event_routes_to_hovered_pane(&WMEK::VertWheel(-1)));
+        // Release and horizontal wheel stay with the focused pane
+        assert!(!event_routes_to_hovered_pane(&WMEK::Release(
+            MousePress::Left
+        )));
+        assert!(!event_routes_to_hovered_pane(&WMEK::HorzWheel(1)));
     }
 }
