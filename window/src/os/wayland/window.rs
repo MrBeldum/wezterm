@@ -35,6 +35,7 @@ use smithay_client_toolkit::shell::xdg::window::{
 };
 use smithay_client_toolkit::shell::xdg::XdgSurface;
 use smithay_client_toolkit::shell::WaylandSurface;
+use url::Url;
 use wayland_client::protocol::wl_callback::WlCallback;
 use wayland_client::protocol::wl_keyboard::{Event as WlKeyboardEvent, KeyState};
 use wayland_client::protocol::wl_pointer::{ButtonState, WlPointer};
@@ -721,6 +722,10 @@ impl WaylandWindowInner {
 
     pub(super) fn dispatch_dropped_files(&mut self, paths: Vec<PathBuf>) {
         self.events.dispatch(WindowEvent::DroppedFile(paths));
+    }
+
+    pub(super) fn dispatch_dropped_urls(&mut self, urls: Vec<Url>) {
+        self.events.dispatch(WindowEvent::DroppedUrl(urls));
     }
 
     pub(crate) fn dispatch_pending_mouse(&mut self) {

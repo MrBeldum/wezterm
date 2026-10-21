@@ -381,3 +381,86 @@ impl ResizeIncrement {
         }
     }
 }
+
+/// Parse the body of a `text/uri-list` drag-and-drop payload, splitting it
+/// into local file paths and remote (non-`file:`) URLs.
+///
+/// Lines beginning with `#` are comments per the `text/uri-list` spec and
+/// are ignored, as are blank lines. Entries that parse as URLs but are not
+/// `file:` URLs (e.g. `https://` links dragged from a browser) are returned
+/// in the URL list rather than being silently discarded (wezterm#8244).
+pub fn parse_dropped_uri_list(url_list: &str) -> (Vec<PathBuf>, Vec<Url>) {
+    let mut paths = Vec::new();
+    let mut urls = Vec::new();
+    for line in url_list.lines() {
+        if line.starts_with('#') || line.trim().is_empty() {
+            // text/uri-list: Any lines beginning with the '#' character
+            // are comment lines and are ignored during processing
+            continue;
+        }
+        let url = match Url::parse(line) {
+            Ok(url) => url,
+            Err(err) => {
+                log::error!("Error parsing dropped uri line {line} as url: {err:#}");
+                continue;
+            }
+        };
+        match url.to_file_path() {
+            Ok(path) => paths.push(path),
+            // Not a file: URL (for example a link dragged from a browser);
+            // keep it as a URL so that it can be pasted as text.
+            Err(_) => urls.push(url),
+        }
+    }
+    (paths, urls)
+}
+
+#[cfg(test)]
+mod dropped_uri_list_tests {
+    use super::*;
+
+    #[test]
+    fn remote_link_is_not_silently_dropped() {
+        // wezterm#8244: dragging a link (not a file) from a browser offers a
+        // text/uri-list containing an https: URL. It must survive parsing
+        // as a URL rather than being silently discarded.
+        let (paths, urls) = parse_dropped_uri_list("https://example.com/search?q=wezterm\n");
+        assert!(paths.is_empty());
+        assert_eq!(urls.len(), 1);
+        assert_eq!(urls[0].as_str(), "https://example.com/search?q=wezterm");
+    }
+
+    #[test]
+    fn file_url_still_becomes_a_path() {
+        let (paths, urls) = parse_dropped_uri_list("file:///home/user/docs/notes.txt\n");
+        assert!(urls.is_empty());
+        assert_eq!(paths, vec![PathBuf::from("/home/user/docs/notes.txt")]);
+    }
+
+    #[test]
+    fn mixed_list_splits_paths_and_urls() {
+        let (paths, urls) = parse_dropped_uri_list(
+            "# a comment line\n\
+             \n\
+             file:///home/user/a.txt\n\
+             https://example.com/b\n\
+             file:///home/user/c.txt\n",
+        );
+        assert_eq!(
+            paths,
+            vec![
+                PathBuf::from("/home/user/a.txt"),
+                PathBuf::from("/home/user/c.txt")
+            ]
+        );
+        assert_eq!(urls.len(), 1);
+        assert_eq!(urls[0].as_str(), "https://example.com/b");
+    }
+
+    #[test]
+    fn comments_and_blank_lines_are_ignored() {
+        let (paths, urls) = parse_dropped_uri_list("# only a comment\n   \n# another\n");
+        assert!(paths.is_empty());
+        assert!(urls.is_empty());
+    }
+}

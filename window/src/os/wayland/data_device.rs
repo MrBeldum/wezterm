@@ -146,8 +146,15 @@ impl DataDeviceHandler for WaylandState {
         };
         if let Some(WindowAndPipe { window_id, read }) = dnd_session.create_pipe_for_drop() {
             std::thread::spawn(move || {
-                if let Some(paths) = DragAndDropSession::read_paths_from_pipe(read) {
-                    DragAndDropSession::dispatch_dropped_files(window_id, paths);
+                if let Some((paths, urls)) = DragAndDropSession::read_paths_from_pipe(read) {
+                    // Only dispatch non-empty events: an empty DroppedFile
+                    // would paste a stray space.
+                    if !paths.is_empty() {
+                        DragAndDropSession::dispatch_dropped_files(window_id, paths);
+                    }
+                    if !urls.is_empty() {
+                        DragAndDropSession::dispatch_dropped_urls(window_id, urls);
+                    }
                 }
             });
         }

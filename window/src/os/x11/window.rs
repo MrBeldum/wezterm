@@ -19,7 +19,6 @@ use raw_window_handle::{
 use std::any::Any;
 use std::convert::TryInto;
 use std::num::NonZeroU32;
-use std::path::PathBuf;
 use std::ptr::NonNull;
 use std::rc::{Rc, Weak};
 use std::sync::{Arc, Mutex};
@@ -1160,8 +1159,17 @@ impl XWindowInner {
                             let urls = parse_xmozurl_list(&data);
                             self.events.dispatch(WindowEvent::DroppedUrl(urls));
                         } else if selection.target() == conn.atom_texturilist {
-                            let paths = parse_texturi_list(prop.value());
-                            self.events.dispatch(WindowEvent::DroppedFile(paths));
+                            let (paths, urls) = crate::parse_dropped_uri_list(
+                                &String::from_utf8_lossy(prop.value()),
+                            );
+                            // Only dispatch non-empty events: an empty
+                            // DroppedFile would paste a stray space.
+                            if !paths.is_empty() {
+                                self.events.dispatch(WindowEvent::DroppedFile(paths));
+                            }
+                            if !urls.is_empty() {
+                                self.events.dispatch(WindowEvent::DroppedUrl(urls));
+                            }
                         }
                     }
                     Err(err) => {
@@ -2174,29 +2182,6 @@ impl WindowOps for XWindow {
             Ok(())
         });
     }
-}
-
-fn parse_texturi_list(url_list: &[u8]) -> Vec<PathBuf> {
-    String::from_utf8_lossy(url_list)
-        .lines()
-        .filter_map(|line| {
-            if line.starts_with('#') || line.trim().is_empty() {
-                // text/uri-list: Any lines beginning with the '#' character
-                // are comment lines and are ignored during processing
-                return None;
-            }
-            let url = Url::parse(line)
-                .map_err(|err| {
-                    log::error!("Error parsing dropped file line {line} as url: {err:#}");
-                })
-                .ok()?;
-            url.to_file_path()
-                .map_err(|_| {
-                    log::error!("Error converting url {url:?} from line {line} to pathbuf");
-                })
-                .ok()
-        })
-        .collect()
 }
 
 fn parse_xmozurl_list(url_list: &str) -> Vec<Url> {

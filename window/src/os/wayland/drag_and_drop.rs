@@ -39,37 +39,27 @@ impl DragAndDropSession {
         })
     }
 
-    pub fn read_paths_from_pipe(read: ReadPipe) -> Option<Vec<PathBuf>> {
-        read_pipe_with_timeout(read)
+    /// Reads the dropped `text/uri-list` payload from the pipe, splitting it
+    /// into local file paths and remote (non-`file:`) URLs.
+    pub fn read_paths_from_pipe(read: ReadPipe) -> Option<(Vec<PathBuf>, Vec<Url>)> {
+        let url_list = read_pipe_with_timeout(read)
             .map_err(|err| {
                 log::error!("Error while reading pipe from drop result: {:#}", err);
             })
-            .ok()?
-            .lines()
-            .filter_map(|line| {
-                if line.starts_with('#') || line.trim().is_empty() {
-                    // text/uri-list: Any lines beginning with the '#' character
-                    // are comment lines and are ignored during processing
-                    return None;
-                }
-                let url = Url::parse(line)
-                    .map_err(|err| {
-                        log::error!("Error parsing dropped file line {} as url: {:#}", line, err);
-                    })
-                    .ok()?;
-                url.to_file_path()
-                    .map_err(|_| {
-                        log::error!("Error converting url {} from line {} to pathbuf", url, line);
-                    })
-                    .ok()
-            })
-            .collect::<Vec<_>>()
-            .into()
+            .ok()?;
+        Some(crate::parse_dropped_uri_list(&url_list))
     }
 
     pub fn dispatch_dropped_files(window_id: usize, paths: Vec<PathBuf>) {
         WaylandConnection::with_window_inner(window_id, move |inner| {
             inner.dispatch_dropped_files(paths);
+            Ok(())
+        });
+    }
+
+    pub fn dispatch_dropped_urls(window_id: usize, urls: Vec<Url>) {
+        WaylandConnection::with_window_inner(window_id, move |inner| {
+            inner.dispatch_dropped_urls(urls);
             Ok(())
         });
     }
