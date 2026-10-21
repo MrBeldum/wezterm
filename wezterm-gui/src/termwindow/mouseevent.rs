@@ -654,6 +654,12 @@ impl super::TermWindow {
         capture_mouse: bool,
     ) {
         let mut is_click_to_focus_pane = false;
+        // For mouse motion over a pane other than the active one (and
+        // without focus-follows-mouse), hover state is resolved against
+        // the pane under the mouse rather than the active pane (#8258).
+        // This stays None for Press/Release/Wheel, for captured drags,
+        // and when focus follows the mouse.
+        let mut hover_pane: Option<Arc<dyn Pane>> = None;
 
         let ClickPosition {
             mut column,
@@ -693,6 +699,13 @@ impl super::TermWindow {
 
                                 pane = Arc::clone(&pos.pane);
                                 context.invalidate();
+                            } else {
+                                // Issue #8258: the mouse is over a pane
+                                // other than the active one; hover state
+                                // (hyperlink highlight, cursor) must be
+                                // resolved against the pane under the
+                                // mouse, not the active pane.
+                                hover_pane.replace(Arc::clone(&pos.pane));
                             }
                         }
                         WMEK::Release(_) | WMEK::HorzWheel(_) => {}
@@ -723,6 +736,13 @@ impl super::TermWindow {
                 break;
             }
         }
+
+        // The pane against which hover state (hyperlink highlight, cursor,
+        // mouse-grab/alt-screen queries) is resolved: the event pane, except
+        // for uncaptured mouse motion over an inactive pane, where it is the
+        // pane under the mouse (#8258). In every other case this is `pane`
+        // itself, so behavior there is unchanged.
+        let hover_pane = hover_pane.as_ref().unwrap_or(&pane);
 
         if capture_mouse {
             self.current_mouse_capture = Some(MouseCapture::TerminalPane(pane.pane_id()));
@@ -767,13 +787,13 @@ impl super::TermWindow {
             event
         );
 
-        let dims = pane.get_dimensions();
+        let dims = hover_pane.get_dimensions();
         let stable_row = self
-            .get_viewport(pane.pane_id())
+            .get_viewport(hover_pane.pane_id())
             .unwrap_or(dims.physical_top)
             + row as StableRowIndex;
 
-        self.pane_state(pane.pane_id())
+        self.pane_state(hover_pane.pane_id())
             .mouse_terminal_coords
             .replace((
                 ClickPosition {
@@ -785,7 +805,7 @@ impl super::TermWindow {
                 stable_row,
             ));
 
-        pane.apply_hyperlinks(stable_row..stable_row + 1, &self.config.hyperlink_rules);
+        hover_pane.apply_hyperlinks(stable_row..stable_row + 1, &self.config.hyperlink_rules);
 
         struct FindCurrentLink {
             current: Option<Arc<Hyperlink>>,
@@ -810,7 +830,7 @@ impl super::TermWindow {
             stable_row,
             column,
         };
-        pane.with_lines_mut(stable_row..stable_row + 1, &mut find_link);
+        hover_pane.with_lines_mut(stable_row..stable_row + 1, &mut find_link);
         let new_highlight = find_link.current;
 
         match (self.current_highlight.as_ref(), new_highlight) {
@@ -837,7 +857,7 @@ impl super::TermWindow {
             // When hovering over a hyperlink, show an appropriate
             // mouse cursor to give the cue that it is clickable
             CursorIcon::Pointer
-        } else if pane.is_mouse_grabbed() || outside_window {
+        } else if hover_pane.is_mouse_grabbed() || outside_window {
             CursorIcon::Default
         } else {
             CursorIcon::Text
@@ -921,7 +941,7 @@ impl super::TermWindow {
 
                 // Since we use shift to force assessing the mouse bindings, pretend
                 // that shift is not one of the mods when the mouse is grabbed.
-                let mut mouse_reporting = pane.is_mouse_grabbed();
+                let mut mouse_reporting = hover_pane.is_mouse_grabbed();
                 if mouse_reporting {
                     if modifiers.contains(self.config.bypass_mouse_reporting_modifiers) {
                         modifiers.remove(self.config.bypass_mouse_reporting_modifiers);
@@ -935,7 +955,7 @@ impl super::TermWindow {
                     // scrolling assignments won't have any effect.
                     // Ensure that we scroll to the bottom if they try to
                     // use the mouse so that things are less surprising
-                    self.scroll_to_bottom(&pane);
+                    self.scroll_to_bottom(hover_pane);
                 }
 
                 // normalize delta and streak to make mouse assignment
@@ -974,7 +994,7 @@ impl super::TermWindow {
                 let mouse_mods = config::MouseEventTriggerMods {
                     mods: modifiers,
                     mouse_reporting,
-                    alt_screen: if pane.is_alt_screen_active() {
+                    alt_screen: if hover_pane.is_alt_screen_active() {
                         MouseEventAltScreen::True
                     } else {
                         MouseEventAltScreen::False
@@ -982,7 +1002,7 @@ impl super::TermWindow {
                 };
 
                 if let Some(action) = self.input_map.lookup_mouse(event_trigger_type, mouse_mods) {
-                    self.perform_key_assignment(&pane, &action).ok();
+                    self.perform_key_assignment(hover_pane, &action).ok();
                     return;
                 }
             }
@@ -1032,7 +1052,15 @@ impl super::TermWindow {
         if allow_action
             && !(self.config.swallow_mouse_click_on_pane_focus && is_click_to_focus_pane)
         {
-            pane.mouse_event(mouse_event).ok();
+            // Issue #8258: don't forward motion to the active pane's program
+            // when the mouse is over a different pane: the coordinates are
+            // expressed in the hovered pane's space and would be garbage to
+            // the active pane. (For Press/Release/Wheel, for captured drags,
+            // and when focus follows the mouse, hover_pane == pane, so those
+            // are unaffected.)
+            if hover_pane.pane_id() == pane.pane_id() {
+                pane.mouse_event(mouse_event).ok();
+            }
         }
 
         match event.kind {
